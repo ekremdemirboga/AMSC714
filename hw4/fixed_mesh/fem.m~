@@ -1,0 +1,166 @@
+% file fem.m
+%
+% We solve the problem
+% - div ( a grad u ) + c u = f  in Omega
+%    u = g_D          on Gamma_D
+%    du/dn = g_N      on Gamma_N
+%
+% the following files are necessary:
+%   elem_vertices.txt       \  defining the 
+%   vertex_coordinates.txt  /  geometric mesh
+%   dirichlet.txt           -> vertices on Gamma_D
+% neumann.txt  -> segments on the Neumann boundary Gamma_N
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  problem  data
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% diffusion coefficient (a) of the equation
+coef_a = 1.0;
+% reaction coefficient (c) of the equation
+coef_c = 0.0;
+
+
+% right-hand side function f
+%fc_f = inline('sin(pi*x(1))*sin(pi*x(2))','x');
+%fc_f = inline('2*(x(1)>0.5)','x');
+fc_f = inline('20*exp(-10*norm(x)^2)*(2-20*norm(x)^2)', 'x');
+
+% Dirichlet data, function g_D
+fc_gD = inline('exp(-10*norm(x)^2)','x'); 
+
+% Neumann data, function g_N
+fc_gN = inline('0', 'x');
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%  start  of  resolution
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+if (exist('elem_vertices.txt')==2)
+    elem_vertices = load('elem_vertices.txt');
+else
+    disp('PANIC!  no  elem_vertices.txt  file');
+    return
+end
+if (exist('vertex_coordinates.txt')==2)
+    vertex_coordinates   = load('vertex_coordinates.txt');
+else
+    disp('PANIC!  no  vertex_coordinates.txt  file');
+    return
+end
+
+if (exist('dirichlet.txt')==2)
+    dirichlet  = load('dirichlet.txt');
+else
+    dirichlet = [];
+end
+
+if (exist('neumann.txt')==2)
+    neumann = load('neumann.txt');
+else
+    neumann = [];
+end
+
+% end of mesh input
+
+
+% Start of matrix and right-hand side asemmbly
+n_vertices = size(vertex_coordinates, 1); 
+n_elem = size(elem_vertices, 1);
+
+A  = sparse(n_vertices, n_vertices);
+fh = zeros(n_vertices, 1);
+
+% gradients of the basis functions in the reference element
+grd_bas_fcts = [ -1 -1 ; 1 0 ; 0 1 ]' ;
+    
+% We loop over the elements of the mesh,
+% and add the contributions of each element to the matrix A
+% and the right-hand side fh
+
+% At each element we use the cuadrature formula which uses 
+% the function values at the midpoint of each side:
+% \int_T  f  \approx  |T| ( f(m12) + f(m23) + f(m31) ) / 3.
+% This formula is exact for quadratic polynomials
+
+for el = 1 : n_elem
+    v_elem = elem_vertices( el, : );
+    
+    v1 = vertex_coordinates( v_elem(1), :)' ; % coords. del 1er vertice del elem.
+    v2 = vertex_coordinates( v_elem(2), :)' ; % coords. del 2do vertice del elem.
+    v3 = vertex_coordinates( v_elem(3), :)' ; % coords. del 3er vertice del elem.
+    
+    m12 = (v1 + v2) / 2; % midpoint of side 1-2
+    m23 = (v2 + v3) / 2; % midpoint of side 2-3
+    m31 = (v3 + v1) / 2; % midpoint of side 3-1
+
+    % evaluation of f at the quadrature points
+    f12 = fc_f(m12);  f23 = fc_f(m23);  f31 = fc_f(m31); 
+    
+    % derivative of the affine transformation from the reference
+    % element onto the current element
+    B = [ v2-v1  v3-v1 ];
+    
+    % element area
+    el_area = abs(det(B)) * 0.5;
+
+    % computation of the element load vector
+    f_el = [ (f12+f31)*0.5 ; (f12+f23)*0.5 ; (f23+f31)*0.5 ] * (el_area/3);
+    
+    % contributions added to the global load vector
+    fh( v_elem ) = fh( v_elem ) + f_el;
+
+    Binv = inv(B);
+
+    % computation of the element matrix
+    el_mat = coef_a * grd_bas_fcts' * (Binv*Binv') * grd_bas_fcts * el_area ...
+           + coef_c * el_area * [ 1/6 1/12 1/12 ; 1/12 1/6 1/12; 1/12 1/12 1/6];
+  
+    % contributions added to the global matrix
+    A( v_elem, v_elem ) = A( v_elem, v_elem ) + el_mat;
+    
+end
+
+% We now loop through the Neumann segments
+% and add the integral of the basis functions against g_N
+% at the corresponding position of the load vector  fh
+
+% at each segment we use Simpson's rule
+% int_a^b f \approx (b-a)/6 * ( 1 f(a) + 4 f((a+b)/2) + 1 f(b) )
+
+if (neumann != [])
+  n_neumann_segments = size(neumann, 1);
+  for i = 1:n_neuman_segments
+    v_seg = neumann(i, :);
+    v1 = vertex_coordinates( v_seg(1) , : );   % coords. of 1st vertex of segment
+    v2 = vertex_coordinates( v_seg(2) , : );   % coords. of 2nd vertex of segment
+    m = (v1 + v2) / 2;
+    
+    segment_length = norm(v2-v1);
+    
+    g1 = fc_gN(v1);   g2 = fc_gN(v2);   gm = fc_gN(m);
+    f_seg = [ g1+2*gm ;  2*gm+g2 ] * segment_length / 6;
+    
+    fh( v_seg ) = fh( v_seg ) + f_seg;
+  end
+end
+
+
+% We now impose the Dirichlet boundary conditions
+% enforcing the corresponding rows of A to be  e_i
+% and the right hand side to be g_D( x_i )
+for i = 1:length(dirichlet)
+  diri = dirichlet(i);
+  A(diri,:) = zeros(1, n_vertices);
+  A(diri,diri) = 1;
+  fh(diri) = fc_gD( vertex_coordinates(diri, :) );
+end
+
+% and finally we solve for u
+uh = A \ fh;
+
+
+% at this point 'uh' contains the solution at each vertex
+% we plot it with
+vtk_trimesh(elem_vertices, vertex_coordinates(:,1), vertex_coordinates(:,2), uh);
